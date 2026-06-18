@@ -66,6 +66,7 @@ WORLD = [
     ("Cairns, AU",-16.92,145.78),("Darwin, AU",-12.46,130.84),
     ("Raglan, NZ",-37.799,174.821),("Gisborne, NZ",-38.67,178.02),("Piha, NZ",-36.95,174.47),("Dunedin, NZ",-45.88,170.50),
     ("Fiji (Cloudbreak)",-17.85,177.19),("Teahupoo, Tahiti",-17.85,-149.27),("Samoa",-13.83,-171.74),
+    ("Santander, ES",43.461,-3.804),
 ]
 
 def fetch(url):
