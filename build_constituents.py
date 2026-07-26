@@ -69,6 +69,26 @@ WORLD = [
     ("Santander, ES",43.461,-3.804),
     ("Lacanau, FR",44.998,-1.198),
 ]
+# Tide-gauge stations: (label, lat, lng, amps ft, Greenwich phases deg). IDs
+# continue after WORLD. These carry their constants inline instead of being
+# sampled from EOT20: the Mediterranean tide is only a few cm, and a 1/8-deg
+# altimetry model does not resolve the Adriatic amplification or the harbour
+# response at these sites. Values are a least-squares fit of the 8 principal
+# constituents (24 fitted, 8 kept) to ~384 days of ISPRA/IOC gauge records:
+# https://www.ioc-sealevelmonitoring.org  (VE19, LI11, TA18, 'rad' sensor).
+# The method reproduces NOAA's published constants at San Francisco, New York
+# and Boston to within 2% in amplitude and ~2 deg in phase.
+GAUGE = [
+    ("Venice, IT",45.418,12.427,
+     [0.776,0.462,0.137,0.134,0.575,0.169,0.188,0.028],
+     [263.8,271.8,260.5,268.4,65.2,57.2,59.8,62.6]),
+    ("Livorno, IT",43.546,10.299,
+     [0.314,0.12,0.065,0.033,0.114,0.05,0.036,0.009],
+     [227.3,244.3,216.4,240.0,182.5,106.9,173.2,62.1]),
+    ("Taranto, IT",40.476,17.224,
+     [0.215,0.114,0.041,0.033,0.064,0.029,0.025,0.005],
+     [68.9,73.3,65.9,70.4,37.0,26.8,32.4,64.0]),
+]
 
 def fetch(url):
     with urllib.request.urlopen(url) as r:
@@ -140,6 +160,11 @@ def main(ncpath):
         write(sid, {"z": 0.0, "lat": la, "lng": lo, "toff": 0, "a": a, "g": g})
         catalog.append((sid, label))
         print(f"W    {label:22s} {sid}  M2={a[0]}ft")
+    for label, la, lo, a, g in GAUGE:
+        sid = str(wid); wid += 1
+        write(sid, {"z": 0.0, "lat": la, "lng": lo, "toff": 0, "a": a, "g": g})
+        catalog.append((sid, label))
+        print(f"G    {label:22s} {sid}  M2={a[0]}ft")
 
     json.dump([{"id": c[0], "name": c[1]} for c in catalog],
               open(os.path.join(OUT, "index.json"), "w"), separators=(",", ":"))
