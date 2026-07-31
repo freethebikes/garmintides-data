@@ -31,9 +31,9 @@ US = [
     ("Galveston, TX","8771510",29.2853,-94.7894),("Grand Isle, LA","8761724",29.2633,-89.9567),
     ("Tampa, FL","8726607",27.8578,-82.5528),("Key West, FL","8724580",24.5557,-81.8079),
     ("Miami, FL","8723214",25.7314,-80.1618),("Charleston, SC","8665530",32.7808,-79.9236),
-    ("Norfolk, VA","8638610",36.9428,-76.3286),("Atlantic City, NJ","8534720",39.3567,-74.4181),
-    ("New York, NY","8518750",40.7006,-74.0142),("Boston, MA","8443970",42.3539,-71.0503),
-    ("Portland, ME","8418150",43.658054,-70.24416),
+    ("Norfolk, VA","8638610",36.9428,-76.3286),("Ocean City, MD","8570280",38.3267,-75.0833),
+    ("Atlantic City, NJ","8534720",39.3567,-74.4181),("New York, NY","8518750",40.7006,-74.0142),
+    ("Boston, MA","8443970",42.3539,-71.0503),("Portland, ME","8418150",43.658054,-70.24416),
 ]
 # World cities via EOT20: (label, lat, lng). IDs assigned 9900001+.
 WORLD = [
@@ -91,6 +91,41 @@ GAUGE = [
      [68.9,73.3,65.9,70.4,37.0,26.8,32.4,64.0]),
 ]
 
+# Country for each label suffix used by WORLD/GAUGE, for grouping the catalog.
+# Only non-U.S. suffixes belong here: several two-letter codes are ambiguous
+# across the two lists (MA is Massachusetts in US but Morocco in WORLD; likewise
+# PA, IN, DE), so U.S. stations are tagged from their source list, never parsed.
+COUNTRY = {
+    "AE": "United Arab Emirates", "AR": "Argentina", "AU": "Australia", "BR": "Brazil",
+    "CL": "Chile", "CR": "Costa Rica", "DE": "Germany", "ES": "Spain", "FR": "France",
+    "ID": "Indonesia", "IE": "Ireland", "IN": "India", "IT": "Italy", "JP": "Japan",
+    "KE": "Kenya", "KR": "South Korea", "LK": "Sri Lanka", "MA": "Morocco",
+    "MV": "Maldives", "MX": "Mexico", "NA": "Namibia", "NG": "Nigeria",
+    "NL": "Netherlands", "NO": "Norway", "NZ": "New Zealand", "OM": "Oman",
+    "PA": "Panama", "PE": "Peru", "PH": "Philippines", "PT": "Portugal",
+    "SN": "Senegal", "TH": "Thailand", "TW": "Taiwan", "TZ": "Tanzania",
+    "UK": "United Kingdom", "UY": "Uruguay", "VN": "Vietnam", "ZA": "South Africa",
+}
+US_COUNTRY = "United States"
+
+def country_of(label):
+    """Country a WORLD/GAUGE label belongs to. Suffixes that are already a place
+    name ('Tofino, Canada') stand for themselves, as do labels with no suffix at
+    all ('Singapore', 'Fiji (Cloudbreak)' -> Fiji)."""
+    if ", " in label:
+        suffix = label.rsplit(", ", 1)[1]
+        return COUNTRY.get(suffix, suffix)
+    return label.split(" (")[0]
+
+def city_of(label):
+    return label.rsplit(", ", 1)[0] if ", " in label else label
+
+def sort_catalog(catalog):
+    """Order (id, label, country) entries: U.S. first, then country A-Z, city
+    A-Z within each country. IDs are untouched -- they are baked into saved
+    watch-face settings and into the tides/<id>.json filenames."""
+    return sorted(catalog, key=lambda e: (e[2] != US_COUNTRY, e[2], city_of(e[1])))
+
 def fetch(url):
     with urllib.request.urlopen(url) as r:
         return json.load(r)
@@ -142,9 +177,9 @@ def main(ncpath):
                         if abs(float(re)) + abs(float(im)) > 1e-6: return ii, jj
         return None
 
-    catalog = []  # (id, label)
+    catalog = []  # (id, label, country)
     for label, sid, la, lng in US:
-        write(sid, us_station(sid, la, lng)); catalog.append((sid, label))
+        write(sid, us_station(sid, la, lng)); catalog.append((sid, label, US_COUNTRY))
         print(f"US   {label:22s} {sid}")
     wid = 9900001
     for label, la, lo in WORLD:
@@ -159,19 +194,20 @@ def main(ncpath):
             g.append(round(math.degrees(math.atan2(im, re)) % 360.0, 1))
         sid = str(wid); wid += 1
         write(sid, {"z": 0.0, "lat": la, "lng": lo, "toff": 0, "a": a, "g": g})
-        catalog.append((sid, label))
+        catalog.append((sid, label, country_of(label)))
         print(f"W    {label:22s} {sid}  M2={a[0]}ft")
     for label, la, lo, a, g in GAUGE:
         sid = str(wid); wid += 1
         write(sid, {"z": 0.0, "lat": la, "lng": lo, "toff": 0, "a": a, "g": g})
-        catalog.append((sid, label))
+        catalog.append((sid, label, country_of(label)))
         print(f"G    {label:22s} {sid}  M2={a[0]}ft")
 
+    catalog = sort_catalog(catalog)
     json.dump([{"id": c[0], "name": c[1]} for c in catalog],
               open(os.path.join(OUT, "index.json"), "w"), separators=(",", ":"))
     print(f"\n{len(catalog)} cities -> {OUT}")
     print("\n--- settings.xml dropdown (paste into app) ---")
-    for sid, label in catalog:
+    for sid, label, _ in catalog:
         print(f'            <listEntry value="{sid}">{label}</listEntry>')
 
 if __name__ == "__main__":
