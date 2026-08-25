@@ -14,11 +14,34 @@ Each station is one `tides/<id>.json` served over GitHub Pages, holding 8 consti
 
 ## The invariant that must never break
 
-**Only ever append to `WORLD` and `GAUGE`.** IDs are assigned positionally from
-`9900001` in list order (`stations()` in `build_constituents.py`). Inserting an entry
-mid-list, deleting one, or re-sorting the list for tidiness renumbers every station
-after it — which orphans each `tides/<id>.json` and silently repoints every watch that
-already has that city saved. The user sees a different city than the one they picked.
+**Only ever append to `WORLD`, and never renumber `GAUGE`.** WORLD ids are assigned
+positionally from `9900001` in list order (`stations()` in `build_constituents.py`).
+Inserting an entry mid-list, deleting one, or re-sorting the list for tidiness renumbers
+every station after it — which orphans each `tides/<id>.json` and silently repoints every
+watch that already has that city saved. The user sees a different city than the one they
+picked.
+
+`GAUGE` ids are **pinned explicitly** in the tuple, and the WORLD allocator skips them.
+This is load-bearing: those ids were once handed out by the same running counter, so
+appending a single WORLD city renumbered all three Mediterranean stations and reused
+Venice's id for the new city. Do not "simplify" the pinned ids back into a counter.
+
+After changing any list, prove no existing id moved before you build anything:
+
+```bash
+python3 - <<'EOF'
+import json, importlib.util
+spec = importlib.util.spec_from_file_location("b", "build_constituents.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+committed = {e["id"]: e["name"] for e in json.load(open("tides/index.json"))}
+cur = {s[0]: s[1] for s in m.stations()}
+moved = [(i, committed[i], cur.get(i)) for i in committed if committed[i] != cur.get(i)]
+print("REPOINTED:", moved if moved else "none")
+print("new ids:", [i for i in cur if i not in committed])
+EOF
+```
+
+`REPOINTED: none` is the only acceptable result for an addition.
 
 This is why `Santander, ES` and `Lacanau, FR` sit at the end of `WORLD` instead of with
 the other Spanish and French entries. That is deliberate; do not "fix" it.
@@ -43,9 +66,15 @@ harbor response. EOT20 is a 1/8° altimetry model, heights relative to mean sea 
 
 Reach for `GAUGE` when the tide is small and the basin geometry does the work — EOT20
 resolves neither the Adriatic amplification toward Venice nor local harbour response, and
-a few-cm error is the whole signal there. A `GAUGE` entry carries its constants inline;
-producing them is a separate least-squares job against ~1 year of
-[IOC](https://www.ioc-sealevelmonitoring.org) records, not something this skill runs.
+a few-cm error is the whole signal there. A `GAUGE` entry carries its constants inline
+plus a pinned id; producing the constants is a separate least-squares job against ~1 year
+of [IOC](https://www.ioc-sealevelmonitoring.org) records, not something this skill runs.
+
+Borrowing a nearby gauge's constants is not a substitute for either. Tides change fast
+across amphidromic systems: the nearest IOC gauge to Newcastle, Co. Down is Bangor at
+51 km, but it sits in Belfast Lough facing the North Channel while Newcastle faces the
+Irish Sea, on the far side of the Irish Sea amphidrome. Distance alone does not license a
+transplant — check that the two sites share a basin and a tidal regime.
 
 ### Picking the right NOAA station
 
@@ -79,11 +108,16 @@ python3 build_constituents.py --index-only          # rebuild tides/index.json
   ambiguous match rather than guessing.
 - NOAA and `GAUGE` stations need no EOT20 file and no `netCDF4` install.
 - `WORLD` stations need EOT20, read from `$EOT20_NC` or `~/.cache/eot20/EOT20_ocean.nc`.
-  Keep it out of `/tmp`, which gets wiped.
+  If it isn't there, run `./fetch_eot20.sh` (27 MB, a few seconds). Do not try to
+  assemble it from the SEANOE original: that is the authoritative citation, but it is a
+  2.3 GB zip of 17 separate per-constituent files served with no `Accept-Ranges`, so an
+  interrupted download restarts from zero and in practice never finishes.
 - Both modes rewrite `index.json` and print the settings dropdown block.
 
-`--index-only` refuses to run if any station in the lists has no data file on disk, so a
-station that was added to a list but never built can't be advertised to the watch face.
+Every mode refuses to write `index.json` if any station in the lists has no data file on
+disk, so a station that was added to a list but never built can't be advertised to the
+watch face. Note this applies to `--only` too: building one station still rewrites the
+whole index, so a half-finished addition elsewhere in the lists will block it.
 
 ## Step 3 — verify before committing
 
@@ -98,7 +132,22 @@ whole job. Do not skip it and do not substitute "the file was written".
 3. **Use a control.** Run the same comparison for a station already shipped nearby, so
    you know what "good" looks like on this coast. Ocean City landed within 5 min against
    7 min for the Atlantic City control — the control is what makes 5 min meaningful.
-4. **Sanity-check M2.** The printed `M2=<x>ft` should match the region. A near-zero M2 on
+
+   For an EOT20 station with no published predictions handy, compare mean spring range
+   (`2*(M2+S2)`) against harbour-table MHWS−MLWS, and do the same for shipped neighbours.
+   EOT20 is an open-ocean altimetry model and systematically *under*-predicts coastal
+   amplification: shipped stations run at roughly 76–97% of published range (Dublin is
+   the low end, being a shallow enclosed bay). A new station landing in that band is
+   behaving normally; one *above* published range, or well below 76%, means the sampler
+   probably picked an unrepresentative cell.
+
+4. **Check the cell it actually sampled.** `Eot20._nearest_ocean()` walks outward for the
+   first wet cell, which near a coast can be some km away and, near an amphidrome, on a
+   steep gradient. Print the chosen cell, its distance, and the M2 field a few cells
+   around it. At Newcastle the cell was 3.7 km out and M2 ran from 0.72 m to 1.73 m
+   across a 7×7 neighbourhood — so the value is real but gradient-sensitive to about
+   ±0.1 m, which is worth stating in the commit rather than implying false precision.
+5. **Sanity-check M2.** The printed `M2=<x>ft` should match the region. A near-zero M2 on
    an open Atlantic coast means the EOT20 sampler grabbed a masked or inland cell.
 
 Verify against the actual published predictions, not against the tide curve the watch

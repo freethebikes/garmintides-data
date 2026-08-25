@@ -77,6 +77,7 @@ WORLD = [
     ("Fiji (Cloudbreak)",-17.85,177.19),("Teahupoo, Tahiti",-17.85,-149.27),("Samoa",-13.83,-171.74),
     ("Santander, ES",43.461,-3.804),
     ("Lacanau, FR",44.998,-1.198),
+    ("Newcastle, IE",54.218,-5.890),
 ]
 # Tide-gauge stations: (label, lat, lng, amps ft, Greenwich phases deg). IDs
 # continue after WORLD. These carry their constants inline instead of being
@@ -87,14 +88,19 @@ WORLD = [
 # https://www.ioc-sealevelmonitoring.org  (VE19, LI11, TA18, 'rad' sensor).
 # The method reproduces NOAA's published constants at San Francisco, New York
 # and Boston to within 2% in amplitude and ~2 deg in phase.
+# Ids here are explicit, not positional. They were originally handed out by the
+# same counter that numbers WORLD, which meant appending one WORLD city silently
+# renumbered all three of these -- Venice's id would have been reused for the new
+# city, and every watch with Venice saved would have started showing it. Pinning
+# them makes WORLD safe to append to; the allocator skips these ids.
 GAUGE = [
-    ("Venice, IT",45.418,12.427,
+    ("9900094","Venice, IT",45.418,12.427,
      [0.776,0.462,0.137,0.134,0.575,0.169,0.188,0.028],
      [263.8,271.8,260.5,268.4,65.2,57.2,59.8,62.6]),
-    ("Livorno, IT",43.546,10.299,
+    ("9900095","Livorno, IT",43.546,10.299,
      [0.314,0.12,0.065,0.033,0.114,0.05,0.036,0.009],
      [227.3,244.3,216.4,240.0,182.5,106.9,173.2,62.1]),
-    ("Taranto, IT",40.476,17.224,
+    ("9900096","Taranto, IT",40.476,17.224,
      [0.215,0.114,0.041,0.033,0.064,0.029,0.025,0.005],
      [68.9,73.3,65.9,70.4,37.0,26.8,32.4,64.0]),
 ]
@@ -136,16 +142,19 @@ def sort_catalog(catalog):
 
 def stations():
     """Every station as (sid, label, country, kind, args), derived from the
-    source lists alone -- no netCDF, no network. WORLD and GAUGE ids are
-    assigned positionally from 9900001 in list order, so entries must only ever
-    be appended: renumbering orphans each tides/<id>.json and silently repoints
-    every watch that already has that city saved."""
+    source lists alone -- no netCDF, no network. WORLD ids are assigned
+    positionally from 9900001 in list order, skipping any id pinned by GAUGE, so
+    WORLD entries must only ever be appended: inserting, deleting or re-sorting
+    renumbers everything after the change, which orphans each tides/<id>.json and
+    silently repoints every watch that already has that city saved."""
     out = [(sid, label, US_COUNTRY, "US", (la, lo)) for label, sid, la, lo in US]
+    reserved = {g[0] for g in GAUGE}
     wid = 9900001
     for label, la, lo in WORLD:
+        while str(wid) in reserved: wid += 1
         out.append((str(wid), label, country_of(label), "W", (la, lo))); wid += 1
-    for label, la, lo, a, g in GAUGE:
-        out.append((str(wid), label, country_of(label), "G", (la, lo, a, g))); wid += 1
+    for sid, label, la, lo, a, g in GAUGE:
+        out.append((sid, label, country_of(label), "G", (la, lo, a, g)))
     return out
 
 def find_station(spec):
@@ -292,14 +301,7 @@ def main(argv):
     all_ = stations()
 
     if index_only:
-        # The catalog comes from the source lists, but every id it names must
-        # already have a data file -- otherwise index.json would advertise a
-        # city the watch face cannot fetch.
-        missing = [f"{s[1]} ({s[0]})" for s in all_
-                   if not os.path.exists(os.path.join(OUT, s[0] + ".json"))]
-        if missing:
-            sys.exit("no data file for: " + ", ".join(missing) +
-                     "\nRun with --only <id> to build them first.")
+        pass
     elif only:
         build(find_station(only), eot20)
     else:
@@ -308,6 +310,16 @@ def main(argv):
         eot20._load()
         for s in all_:
             build(s, eot20)
+
+    # Every id the catalog names must have a data file, in every mode. Building
+    # one station still rewrites the whole index, so without this an unbuilt
+    # entry anywhere in the lists would be advertised to the watch face as a
+    # city it can fetch, and the fetch would 404.
+    missing = [f"{s[1]} ({s[0]})" for s in all_
+               if not os.path.exists(os.path.join(OUT, s[0] + ".json"))]
+    if missing:
+        sys.exit("no data file for: " + ", ".join(missing) +
+                 "\nRun with --only <id> to build them first; index.json is unchanged.")
 
     write_index([(s[0], s[1], s[2]) for s in all_])
 
