@@ -10,16 +10,24 @@ harbors). The rest use the EOT20 global ocean-tide model (CC BY 4.0; heights
 relative to mean sea level, z=0). Constituent order is fixed: M2 S2 N2 K2 K1 O1
 P1 Q1.
 
-Run:  python3 build_constituents.py /path/to/EOT20_ocean.nc
-Outputs tides/*.json and prints the watch settings.xml dropdown entries.
+Run:
+  python3 build_constituents.py [EOT20_ocean.nc]   rebuild every station
+  python3 build_constituents.py --only SPEC        rebuild one, by id or label
+  python3 build_constituents.py --index-only       rebuild tides/index.json only
+
+--only and --index-only exist so that adding one city does not cost a full
+regeneration: a NOAA city needs no EOT20 file and no netCDF4 install at all, and
+the catalog is derivable from the source lists alone. All three modes write
+tides/index.json and print the watch settings.xml dropdown entries.
 """
 import sys, os, json, math, urllib.request
-import numpy as np
-import netCDF4
 
 ORDER = ["M2","S2","N2","K2","K1","O1","P1","Q1"]
 MD = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations"
 OUT = os.path.join(os.path.dirname(__file__), "tides")
+# Persistent by default: /tmp is wiped between sessions, and re-downloading
+# EOT20 to add one city is the single largest cost in this script.
+NC_DEFAULT = os.environ.get("EOT20_NC") or os.path.expanduser("~/.cache/eot20/EOT20_ocean.nc")
 
 # U.S. NOAA stations: (label, id, lat, lng)
 US = [
@@ -126,6 +134,87 @@ def sort_catalog(catalog):
     watch-face settings and into the tides/<id>.json filenames."""
     return sorted(catalog, key=lambda e: (e[2] != US_COUNTRY, e[2], city_of(e[1])))
 
+def stations():
+    """Every station as (sid, label, country, kind, args), derived from the
+    source lists alone -- no netCDF, no network. WORLD and GAUGE ids are
+    assigned positionally from 9900001 in list order, so entries must only ever
+    be appended: renumbering orphans each tides/<id>.json and silently repoints
+    every watch that already has that city saved."""
+    out = [(sid, label, US_COUNTRY, "US", (la, lo)) for label, sid, la, lo in US]
+    wid = 9900001
+    for label, la, lo in WORLD:
+        out.append((str(wid), label, country_of(label), "W", (la, lo))); wid += 1
+    for label, la, lo, a, g in GAUGE:
+        out.append((str(wid), label, country_of(label), "G", (la, lo, a, g))); wid += 1
+    return out
+
+def find_station(spec):
+    """Resolve an --only SPEC (station id, or a case-insensitive substring of the
+    label) to exactly one station. Ambiguity is an error rather than a guess:
+    'San' alone matches seven cities, and picking one silently would overwrite
+    the wrong data file."""
+    all_ = stations()
+    hits = [s for s in all_ if s[0] == spec]
+    if not hits:
+        hits = [s for s in all_ if spec.lower() in s[1].lower()]
+    if not hits:
+        sys.exit(f"no station matches {spec!r}")
+    if len(hits) > 1:
+        sys.exit("ambiguous: " + ", ".join(f"{s[1]} ({s[0]})" for s in hits))
+    return hits[0]
+
+class Eot20:
+    """EOT20 sampler, opened on first use. Loading the dataset (and importing
+    netCDF4/numpy) is the expensive part of a run, so the NOAA and gauge paths
+    never pay for it."""
+    def __init__(self, ncpath):
+        self.ncpath = ncpath
+        self._ds = None
+
+    def _load(self):
+        if self._ds is not None: return
+        global np
+        import numpy as np
+        import netCDF4
+        if not os.path.exists(self.ncpath):
+            sys.exit(f"EOT20 file not found: {self.ncpath}\n"
+                     "Pass its path as an argument or set EOT20_NC.")
+        ds = netCDF4.Dataset(self.ncpath)
+        names = ds.variables["constituents"].constituent_order.upper().split()
+        self._ds = ds
+        self.lon = ds.variables["lon"][:]; self.lat = ds.variables["lat"][:]
+        self.hRe = ds.variables["hRe"]; self.hIm = ds.variables["hIm"]
+        self.cidx = {n: names.index(n) for n in ORDER}
+
+    def _nearest_ocean(self, la, lo):
+        m2 = self.cidx["M2"]
+        lon, lat, hRe, hIm = self.lon, self.lat, self.hRe, self.hIm
+        if lo < 0 and lon.max() > 180: lo += 360
+        j = int(np.argmin(np.abs(lon - lo))); i = int(np.argmin(np.abs(lat - la)))
+        for r in range(0, 12):
+            for di in range(-r, r + 1):
+                for dj in range(-r, r + 1):
+                    ii, jj = i + di, j + dj
+                    if 0 <= ii < len(lat) and 0 <= jj < len(lon):
+                        re = hRe[m2, ii, jj]; im = hIm[m2, ii, jj]
+                        if np.ma.is_masked(re) or np.ma.is_masked(im): continue
+                        if abs(float(re)) + abs(float(im)) > 1e-6: return ii, jj
+        return None
+
+    def constants(self, la, lo):
+        """(amplitudes ft, Greenwich phases deg) at the nearest wet cell."""
+        self._load()
+        cell = self._nearest_ocean(la, lo)
+        if cell is None:
+            return None
+        i, j = cell
+        a = []; g = []
+        for n in ORDER:
+            re = float(self.hRe[self.cidx[n], i, j]); im = float(self.hIm[self.cidx[n], i, j])
+            a.append(round(math.hypot(re, im) * 3.280839895, 3))
+            g.append(round(math.degrees(math.atan2(im, re)) % 360.0, 1))
+        return a, g
+
 def fetch(url):
     with urllib.request.urlopen(url) as r:
         return json.load(r)
@@ -155,53 +244,31 @@ def us_station(sid, lat, lng):
     base["toff"] = toff; base["lat"] = lat; base["lng"] = lng
     return base
 
-def main(ncpath):
-    os.makedirs(OUT, exist_ok=True)
-    ds = netCDF4.Dataset(ncpath)
-    names = ds.variables["constituents"].constituent_order.upper().split()
-    lon = ds.variables["lon"][:]; lat = ds.variables["lat"][:]
-    hRe = ds.variables["hRe"]; hIm = ds.variables["hIm"]
-    cidx = {n: names.index(n) for n in ORDER}
-    m2 = cidx["M2"]
-
-    def nearest_ocean(la, lo):
-        if lo < 0 and lon.max() > 180: lo += 360
-        j = int(np.argmin(np.abs(lon - lo))); i = int(np.argmin(np.abs(lat - la)))
-        for r in range(0, 12):
-            for di in range(-r, r + 1):
-                for dj in range(-r, r + 1):
-                    ii, jj = i + di, j + dj
-                    if 0 <= ii < len(lat) and 0 <= jj < len(lon):
-                        re = hRe[m2, ii, jj]; im = hIm[m2, ii, jj]
-                        if np.ma.is_masked(re) or np.ma.is_masked(im): continue
-                        if abs(float(re)) + abs(float(im)) > 1e-6: return ii, jj
-        return None
-
-    catalog = []  # (id, label, country)
-    for label, sid, la, lng in US:
-        write(sid, us_station(sid, la, lng)); catalog.append((sid, label, US_COUNTRY))
+def build(station, eot20):
+    """Write tides/<id>.json for one station and report it."""
+    sid, label, _, kind, args = station
+    if kind == "US":
+        la, lo = args
+        write(sid, us_station(sid, la, lo))
         print(f"US   {label:22s} {sid}")
-    wid = 9900001
-    for label, la, lo in WORLD:
-        cell = nearest_ocean(la, lo)
-        if cell is None:
-            print(f"SKIP {label} (no ocean cell / out of EOT20 coverage)"); continue
-        i, j = cell
-        a = []; g = []
-        for n in ORDER:
-            re = float(hRe[cidx[n], i, j]); im = float(hIm[cidx[n], i, j])
-            a.append(round(math.hypot(re, im) * 3.280839895, 3))
-            g.append(round(math.degrees(math.atan2(im, re)) % 360.0, 1))
-        sid = str(wid); wid += 1
+        return
+    if kind == "G":
+        la, lo, a, g = args
         write(sid, {"z": 0.0, "lat": la, "lng": lo, "toff": 0, "a": a, "g": g})
-        catalog.append((sid, label, country_of(label)))
-        print(f"W    {label:22s} {sid}  M2={a[0]}ft")
-    for label, la, lo, a, g in GAUGE:
-        sid = str(wid); wid += 1
-        write(sid, {"z": 0.0, "lat": la, "lng": lo, "toff": 0, "a": a, "g": g})
-        catalog.append((sid, label, country_of(label)))
         print(f"G    {label:22s} {sid}  M2={a[0]}ft")
+        return
+    la, lo = args
+    got = eot20.constants(la, lo)
+    if got is None:
+        # Not a warning: ids are positional, so a station that produces no file
+        # leaves a hole that shifts every later id on the next full rebuild.
+        sys.exit(f"{label} ({sid}): no ocean cell within 12 cells / outside EOT20 coverage")
+    a, g = got
+    write(sid, {"z": 0.0, "lat": la, "lng": lo, "toff": 0, "a": a, "g": g})
+    print(f"W    {label:22s} {sid}  M2={a[0]}ft")
 
+def write_index(catalog):
+    """Write tides/index.json in catalog order and print the dropdown block."""
     catalog = sort_catalog(catalog)
     json.dump([{"id": c[0], "name": c[1]} for c in catalog],
               open(os.path.join(OUT, "index.json"), "w"), separators=(",", ":"))
@@ -210,5 +277,39 @@ def main(ncpath):
     for sid, label, _ in catalog:
         print(f'            <listEntry value="{sid}">{label}</listEntry>')
 
+def main(argv):
+    os.makedirs(OUT, exist_ok=True)
+    args = list(argv)
+    only = index_only = None
+    if "--index-only" in args:
+        args.remove("--index-only"); index_only = True
+    if "--only" in args:
+        i = args.index("--only")
+        if i + 1 >= len(args): sys.exit("--only needs a station id or label")
+        only = args[i + 1]; del args[i:i + 2]
+    ncpath = args[0] if args else NC_DEFAULT
+    eot20 = Eot20(ncpath)
+    all_ = stations()
+
+    if index_only:
+        # The catalog comes from the source lists, but every id it names must
+        # already have a data file -- otherwise index.json would advertise a
+        # city the watch face cannot fetch.
+        missing = [f"{s[1]} ({s[0]})" for s in all_
+                   if not os.path.exists(os.path.join(OUT, s[0] + ".json"))]
+        if missing:
+            sys.exit("no data file for: " + ", ".join(missing) +
+                     "\nRun with --only <id> to build them first.")
+    elif only:
+        build(find_station(only), eot20)
+    else:
+        # Fail before the 22 NOAA round-trips rather than at the first WORLD
+        # station, which is where the dataset is otherwise first touched.
+        eot20._load()
+        for s in all_:
+            build(s, eot20)
+
+    write_index([(s[0], s[1], s[2]) for s in all_])
+
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "/tmp/eot20/EOT20_ocean.nc")
+    main(sys.argv[1:])
